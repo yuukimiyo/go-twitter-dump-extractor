@@ -15,10 +15,15 @@ build: $(SRCS)
 	go build -a -tags netgo -installsuffix netgo $(LDFLAGS) -o bin/$(NAME)
 
 # >> make run ARGS="<args>"
-.PHONY: run
-run:
+.PHONY: start
+start:
 	go build -o bin/$(NAME)
 	bin/$(NAME) $(ARGS)
+
+# >> make run ARGS="<args>"
+.PHONY: run
+run:
+	bin/$(NAME) -stderrthreshold=INFO -v=3 $(ARGS)
 
 .PHONY: dev
 dev:
