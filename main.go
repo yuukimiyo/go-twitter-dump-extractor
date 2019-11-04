@@ -85,7 +85,7 @@ func extractEachFile(fileName string) []string {
 		//  glog.V(3).Infof(apiResult)
 		fmt.Println(apiResult)
 
-		value := getXpathResult(apiResult, 
+		// value := getXpathResult(apiResult, 
 
 		break
 	}
