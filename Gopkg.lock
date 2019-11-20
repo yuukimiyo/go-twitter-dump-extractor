@@ -61,6 +61,14 @@
   version = "v1.6.0"
 
 [[projects]]
+  digest = "1:24480fe9df12563a3c0bd934184167a217c7e08882665c7b4ae3632eeef7b1dd"
+  name = "github.com/shogo82148/go-mecab"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "5519a9fbd49d99626e9e332f3af61d9234e4d95c"
+  version = "v0.0.2"
+
+[[projects]]
   digest = "1:bb495ec276ab82d3dd08504bbc0594a65de8c3b22c6f2aaa92d05b73fbf3a82e"
   name = "github.com/spf13/afero"
   packages = [
@@ -105,11 +113,11 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:815787d46a6b69d0d97c7dbb3cbfd9a1e2d72f4fec1a26e19a26dd0e10a51962"
+  digest = "1:f87238e35814b72ae49e309a9a8bcb058a2f2c57b8ad8313262eb6c46fd5bc40"
   name = "github.com/yuukimiyo/go-totext"
   packages = ["."]
   pruneopts = "UT"
-  revision = "3e9a01f7abc62c950a40ec2cf14b45b224b27a93"
+  revision = "5baf69c12472efb1fadb2dd88066c7441558be58"
 
 [[projects]]
   branch = "master"
@@ -135,14 +143,6 @@
   version = "v0.3.2"
 
 [[projects]]
-  branch = "v1"
-  digest = "1:29f739e9650aea7efbf3f06581bcf1c53c94221f3208684d2bf86df1a757ab3a"
-  name = "gopkg.in/xmlpath.v1"
-  packages = ["."]
-  pruneopts = "UT"
-  revision = "a146725ea6e7e357ca683ef3e02e8a403742b9c0"
-
-[[projects]]
   digest = "1:59f10c1537d2199d9115d946927fe31165959a95190849c82ff11e05803528b0"
   name = "gopkg.in/yaml.v2"
   packages = ["."]
@@ -155,9 +155,9 @@
   analyzer-version = 1
   input-imports = [
     "github.com/golang/glog",
+    "github.com/shogo82148/go-mecab",
     "github.com/spf13/viper",
     "github.com/yuukimiyo/go-totext",
-    "gopkg.in/xmlpath.v1",
   ]
   solver-name = "gps-cdcl"
   solver-version = 1

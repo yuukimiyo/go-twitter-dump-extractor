@@ -10,6 +10,10 @@ REVISION := $(shell git rev-parse --short HEAD)
 SRCS    := $(shell find . -type f -name '*.go')
 LDFLAGS := -ldflags="-s -w -X \"$(REPO)/cmd.Version=$(VERSION)\" -X \"$(REPO)/cmd.Revision=$(REVISION)\" -extldflags \"-static\""
 
+export CGO_ENABLED=1
+export CGO_CFLAGS=-I$(shell mecab-config --inc-dir)
+export CGO_LDFLAGS=$(shell mecab-config --libs) -lm
+
 .PHONY: build
 build: $(SRCS)
 	go build -a -tags netgo -installsuffix netgo $(LDFLAGS) -o bin/$(NAME)

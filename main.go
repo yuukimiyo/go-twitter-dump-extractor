@@ -4,14 +4,18 @@ import (
 	"bufio"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/golang/glog"
+	mecab "github.com/shogo82148/go-mecab"
 	"github.com/spf13/viper"
 	"github.com/yuukimiyo/go-totext"
 )
@@ -30,9 +34,11 @@ func init() {
 // Statuses is root object of result of twitter search api.
 type Statuses struct {
 	Statuses []struct {
-		Text string `json:"text"`
-		User struct {
-			Name string `json:"name"`
+		CreatedAt string `json:"created_at"`
+		Text      string `json:"text"`
+		User      struct {
+			Name       string `json:"name"`
+			ScreenName string `json:"screen_name"`
 		} `json:"user"`
 		QuotedStatus struct {
 			User struct {
@@ -43,46 +49,7 @@ type Statuses struct {
 	} `json:"statuses"`
 }
 
-func getDirs(dataRoot string) []string {
-	glog.V(3).Infof("datadir: " + dataRoot)
-
-	var dataDirs []string
-
-	files, err := ioutil.ReadDir(dataRoot)
-	if err != nil {
-		glog.Error(err)
-	}
-
-	for _, file := range files {
-		if file.IsDir() {
-			dataDirs = append(dataDirs, filepath.Join(dataRoot, file.Name()))
-		}
-	}
-
-	return dataDirs
-}
-
-func getFiles(dataRoot string) []string {
-	var dataFiles []string
-
-	files, err := ioutil.ReadDir(dataRoot)
-	if err != nil {
-		glog.Error(err)
-	}
-
-	for _, f := range files {
-		fullpath := filepath.Join(dataRoot, f.Name())
-		// _, err := os.Stat(fullpath)
-		// if err != nil {
-		// }
-		dataFiles = append(dataFiles, fullpath)
-	}
-
-	return dataFiles
-}
-
-func parseJson(jsonStr string) Statuses {
-
+func parseJSON(jsonStr string) Statuses {
 	var result Statuses
 	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
 		log.Fatal(err)
@@ -91,101 +58,162 @@ func parseJson(jsonStr string) Statuses {
 	return result
 }
 
-func extractEachFile(fileName string) []string {
-	glog.V(3).Infof("datafile: " + fileName)
-	// fmt.Printf(fileName + "\n")
+func cleanText(text string, repl *strings.Replacer, ptns []*regexp.Regexp) string {
+	for _, ptn := range ptns {
+		text = ptn.ReplaceAllString(text, "")
+	}
 
+	text = repl.Replace(text)
+
+	return text
+}
+
+// WriteLines is function to write string array.
+func WriteLines(filename string, lines []string, linesep string, writeBom bool, modeflag string, permission os.FileMode) error {
+	mode := os.O_WRONLY | os.O_CREATE
+	if modeflag == "a" {
+		mode = os.O_WRONLY | os.O_APPEND
+	} else {
+	}
+
+	f, err := os.OpenFile(filename, mode, permission)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if writeBom {
+		f.Write([]byte{239, 187, 191})
+	}
+
+	for _, line := range lines {
+		f.WriteString(line + linesep)
+	}
+
+	return nil
+}
+
+func extractEachFile(fileName string, mecabModel *mecab.Model) []string {
+	repl := strings.NewReplacer(
+		"\r\n", "",
+		"\r", "",
+		"\n", "",
+		"\t", "",
+		" ", "",
+		"　", "",
+		",", " ",
+	)
+
+	var ptns []*regexp.Regexp
+	ptns = append(ptns, regexp.MustCompile(`@[^\s]+`))
+	ptns = append(ptns, regexp.MustCompile(`#[^\s]+`))
+	ptns = append(ptns, regexp.MustCompile(`RT\s*[:：]`))
+	ptns = append(ptns, regexp.MustCompile(`RT`))
+	ptns = append(ptns, regexp.MustCompile(`(http|https)://([\w-]+\.)+[\w-]+(/[\w-./?%&=]*)?`))
+
+	// MeCabのtaggerを取得
+	tagger, err := mecabModel.NewMeCab()
+	if err != nil {
+		panic(err)
+	}
+	defer tagger.Destroy()
+
+	// ファイルの読み込みを開始
 	fp, err := os.Open(fileName)
 	if err != nil {
 		panic(err)
 	}
 	defer fp.Close()
 
-	var rd = bufio.NewReaderSize(fp, 1000000)
+	var rd = bufio.NewReaderSize(fp, 1024*1024)
+
+	// ファイル名から、データへ書き込む4桁のQueryIDを取得
+	queryID := strings.Split(fileName, "_")[2]
+
+	// 結果格納用の配列
+	lines := []string{}
 
 	for {
-		var line, _ = readLine(rd)
-		if line == "" {
-			break
+		// 読み込みバッファを元に、1行ずつ取得
+		line, err := totext.ReadLine(rd, make([]byte, 0, 1024*1024))
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			glog.Errorf("%s", err)
 		}
 
-		var body = strings.Split(line, "\t")
+		body := strings.Split(line, "\t")
 
-		// zlib+base64で圧縮されたapiの実行結果を伸長
-		apiResult, _ := totext.Inflate(body[2])
+		// zlib+base64で圧縮されたapiの実行結果データを伸張
+		apiResult, err := totext.Inflate(body[2])
+		if err != nil {
+			glog.V(3).Infof("%s", err)
+			continue
+		}
 
-		// apiの実行結果をパース
-		statuses := parseJson(apiResult)
+		// 伸張したapiの実行結果をパース
+		statuses := parseJSON(apiResult)
 
+		// APIの結果は元の、検索結果のツイートデータが配列として格納されている
+		// 各ツイートデータ毎にデータを取得して配列に格納
 		if len(statuses.Statuses) > 0 {
 			for _, eachStatus := range statuses.Statuses {
-				var haveAccountName string = ""
-				if strings.Contains(eachStatus.Text, "PokemonGoApp") {
-					haveAccountName = "have"
+				// ツイート日時を取得（フォーマット以上のツイートは無視する）
+				createdAtUtc, err := time.Parse(time.UnixDate, eachStatus.CreatedAt)
+				if err != nil {
+					continue
 				}
 
-				glog.V(3).Infof("----------")
-				glog.V(3).Infof(eachStatus.User.Name)
-				glog.V(3).Infof(eachStatus.QuotedStatus.User.ScreenName)
-				glog.V(3).Infof(haveAccountName)
+				// UTCで格納されているツイート日時をJSTに変換
+				createdAtJst := createdAtUtc.In(time.FixedZone("Asia/Tokyo", 9*60*60))
+
+				userName := eachStatus.User.ScreenName
+				if len(userName) == 0 {
+					userName = eachStatus.User.Name
+				}
+
+				// ツイート本文を取得
+				text := eachStatus.Text
+
+				// テキストをクレンジング
+				text = cleanText(text, repl, ptns)
+
+				// 分かち書きを実行
+				text, err = tagger.Parse(text)
+				if err != nil {
+					continue
+				}
+
+				text = strings.TrimRight(text, "\n")
+
+				lines = append(lines, fmt.Sprintf("%s\t%s\t%s\t%s", createdAtJst.Format(time.RFC3339), queryID, userName, text))
 			}
 		}
-
-		// value := getXpathResult(apiResult,
-
-		break
 	}
 
-	return nil
+	return lines
 }
 
-/*
-func getXpathResult(xml string, xpath string) string {
-	// xmlテキストをReader化してパース
-	root, err := xmlpath.Parse(strings.NewReader(xml))
+func fileWalker(i int, filePath string, outdir string, mecabModel *mecab.Model, wg *sync.WaitGroup, ch *chan int) {
+	glog.V(3).Infof("[%d] extract: %s", i, filePath)
+
+	// 出力先のファイル名を作成
+	filebase := filepath.Base(strings.Replace(filepath.Base(filePath), ".tsv", "", -1))
+	outfile := outdir + "/" + filebase + "_out.tsv"
+
+	texts := extractEachFile(filePath, mecabModel)
+
+	err := WriteLines(outfile, texts, "\n", true, "w", 0644)
 	if err != nil {
-		glog.Warning(err)
+		glog.Errorf("%s", err)
 	}
 
-	// xpathをコンパイル
-	path := xmlpath.MustCompile(xpath)
-
-	iter := path.Iter(root)
-
-	var lines []string
-
-	for iter.Next() {
-		n := iter.Node()
-		lines = append(lines, n.String())
-	}
-
-	return strings.Join(lines, "\n")
-}
-*/
-
-func readLine(rd *bufio.Reader) (string, bool) {
-	iseof := false
-	buf := make([]byte, 0, 1000000)
-
-	for {
-		l, p, e := rd.ReadLine()
-		if e != nil {
-			if e == io.EOF {
-				iseof = true
-				break
-			} else {
-				panic(e)
-			}
-		}
-
-		buf = append(buf, l...)
-
-		if !p {
-			break
-		}
-	}
-
-	return string(buf), iseof
+	// チャンネルから値を取り出す(一つ空ける)
+	// 空くので、次のスレッドが開始可能になる
+	<-*ch
+	wg.Done()
 }
 
 func main() {
@@ -194,18 +222,43 @@ func main() {
 	// 設定ファイルからTwitter APIの結果ファイルのディレクトリを取得
 	dataRoot := viper.GetString("datadir")
 
-	// 結果ファイルのディレクトリのサブディレクトリ毎に処理
-	for _, eachDir := range getDirs(dataRoot) {
-		// glog.V(3).Infof("datadir: " + eachDir)
-		// サブディレクトリ内の結果ファイル一覧を取得し、ファイル毎に処理
-		dataFiles := getFiles(eachDir)
+	var outdir string = dataRoot + "extract"
 
-		for _, eachFile := range dataFiles {
-			// 個別のファイルからデータを取得
-			extractEachFile(eachFile)
+	// 出力先ディレクトリを、なければ作成
+	err := totext.MakeDir(outdir)
+	if err != nil {
+		glog.Errorf("%s", err)
+	}
+
+	mecabModel, err := mecab.NewModel(map[string]string{"output-format-type": "wakati"})
+	if err != nil {
+		panic(err)
+	}
+	defer mecabModel.Destroy()
+
+	// マルチスレッドのチャンネルを初期化、引数は最大スレッド数
+	ch := make(chan int, 1)
+
+	// マルチスレッドの処理待ちのため
+	wg := &sync.WaitGroup{}
+
+	startTime := time.Now()
+
+	// 入力ディレクトリ内の個別フォルダ/個別ファイルに対して処理を実施
+	files, _ := filepath.Glob(dataRoot + "*/*.tsv")
+	for i, filePath := range files {
+		ch <- 1
+
+		wg.Add(1)
+
+		go fileWalker(i, filePath, outdir, &mecabModel, wg, &ch)
+
+		if i > 3 {
 			break
 		}
-
-		break
 	}
+
+	wg.Wait()
+	glog.V(3).Infof("%s", time.Since(startTime))
+	glog.V(3).Infof("end")
 }
