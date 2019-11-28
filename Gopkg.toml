@@ -24,6 +24,7 @@
 #   go-tests = true
 #   unused-packages = true
 
+ignored = ["github.com/olivere/elastic/v7"]
 
 [prune]
   go-tests = true

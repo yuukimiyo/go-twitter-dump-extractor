@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	elastic "github.com/olivere/elastic/v7"
 	mecab "github.com/shogo82148/go-mecab"
 	"github.com/spf13/viper"
 	"github.com/yuukimiyo/go-totext"
@@ -160,7 +162,7 @@ func extractEachFile(fileName string, mecabModel *mecab.Model) []string {
 		// 各ツイートデータ毎にデータを取得して配列に格納
 		if len(statuses.Statuses) > 0 {
 			for _, eachStatus := range statuses.Statuses {
-				// ツイート日時を取得（フォーマット以上のツイートは無視する）
+				// ツイート日時を取得（フォーマット不正のツイートは無視する）
 				createdAtUtc, err := time.Parse(time.UnixDate, eachStatus.CreatedAt)
 				if err != nil {
 					continue
@@ -168,11 +170,6 @@ func extractEachFile(fileName string, mecabModel *mecab.Model) []string {
 
 				// UTCで格納されているツイート日時をJSTに変換
 				createdAtJst := createdAtUtc.In(time.FixedZone("Asia/Tokyo", 9*60*60))
-
-				userName := eachStatus.User.ScreenName
-				if len(userName) == 0 {
-					userName = eachStatus.User.Name
-				}
 
 				// ツイート本文を取得
 				text := eachStatus.Text
@@ -188,7 +185,7 @@ func extractEachFile(fileName string, mecabModel *mecab.Model) []string {
 
 				text = strings.TrimRight(text, "\n")
 
-				lines = append(lines, fmt.Sprintf("%s\t%s\t%s\t%s", createdAtJst.Format(time.RFC3339), queryID, userName, text))
+				lines = append(lines, fmt.Sprintf("%s\t%s\t%s\t%s\t%s", createdAtJst.Format("2006-01-02 15:04:05"), queryID, eachStatus.User.Name, eachStatus.User.ScreenName, text))
 			}
 		}
 	}
@@ -196,16 +193,78 @@ func extractEachFile(fileName string, mecabModel *mecab.Model) []string {
 	return lines
 }
 
+func bulkInsert(lines []string, cli *elastic.Client, c *context.Context) error {
+	bulkRequest := cli.Bulk()
+	// var req *elastic.BulkIndexRequest
+
+	for _, line := range lines {
+		d := strings.Split(line, "\t")
+
+		data := map[string]string{
+			"createdAt":      d[0],
+			"queryID":        d[1],
+			"userName":       d[2],
+			"userScreenName": d[3],
+			"text":           d[4],
+		}
+		// req = elastic.NewBulkIndexRequest().Index("tweets").Doc(data)
+		bulkRequest = bulkRequest.Add(elastic.NewBulkIndexRequest().Index("tweets").Doc(data))
+	}
+
+	bulkResponse, err := bulkRequest.Do(*c)
+	if err != nil {
+		return err
+	}
+
+	for _, eachResponse := range bulkResponse.Created() {
+		// glog.V(3).Infof("Created Result: %s", eachResponse.Result)
+		if eachResponse.Status != 201 {
+			glog.V(3).Infof("Created status: %d", eachResponse.Status)
+			panic(eachResponse.Result)
+		}
+	}
+
+	for _, eachResponse := range bulkResponse.Indexed() {
+		// glog.V(3).Infof("Indexed Result: %s", eachResponse.Result)
+		if eachResponse.Status != 201 {
+			glog.V(3).Infof("Indexed status: %d", eachResponse.Status)
+			panic(eachResponse.Result)
+		}
+	}
+
+	return nil
+}
+
 func fileWalker(i int, filePath string, outdir string, mecabModel *mecab.Model, wg *sync.WaitGroup, ch *chan int) {
 	glog.V(3).Infof("[%d] extract: %s", i, filePath)
 
-	// 出力先のファイル名を作成
-	filebase := filepath.Base(strings.Replace(filepath.Base(filePath), ".tsv", "", -1))
-	outfile := outdir + "/" + filebase + "_out.tsv"
-
 	texts := extractEachFile(filePath, mecabModel)
 
-	err := WriteLines(outfile, texts, "\n", true, "w", 0644)
+	/*
+		// 出力先のファイル名を作成
+		filebase := filepath.Base(strings.Replace(filepath.Base(filePath), ".tsv", "", -1))
+		outfile := outdir + "/" + filebase + "_out.tsv"
+
+		err := WriteLines(outfile, texts, "\n", true, "w", 0644)
+		if err != nil {
+			glog.Errorf("%s", err)
+		}
+	*/
+
+	c := context.Background()
+
+	cli, err := elastic.NewClient(
+		elastic.SetURL("http://localhost:9200"),
+		elastic.SetSniff(false),
+	)
+
+	if err != nil {
+		glog.Errorf("%s", err)
+	}
+
+	defer cli.Stop()
+
+	err = bulkInsert(texts, cli, &c)
 	if err != nil {
 		glog.Errorf("%s", err)
 	}
@@ -237,7 +296,7 @@ func main() {
 	defer mecabModel.Destroy()
 
 	// マルチスレッドのチャンネルを初期化、引数は最大スレッド数
-	ch := make(chan int, 1)
+	ch := make(chan int, 4)
 
 	// マルチスレッドの処理待ちのため
 	wg := &sync.WaitGroup{}
@@ -245,7 +304,8 @@ func main() {
 	startTime := time.Now()
 
 	// 入力ディレクトリ内の個別フォルダ/個別ファイルに対して処理を実施
-	files, _ := filepath.Glob(dataRoot + "*/*.tsv")
+	// 4007=白猫
+	files, _ := filepath.Glob(dataRoot + "4007/*.tsv")
 	for i, filePath := range files {
 		ch <- 1
 
@@ -253,9 +313,11 @@ func main() {
 
 		go fileWalker(i, filePath, outdir, &mecabModel, wg, &ch)
 
-		if i > 3 {
-			break
-		}
+		/*
+			if i >= 50 {
+				break
+			}
+		*/
 	}
 
 	wg.Wait()
