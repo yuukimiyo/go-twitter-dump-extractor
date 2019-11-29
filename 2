@@ -52,17 +52,14 @@ type Statuses struct {
 	} `json:"statuses"`
 }
 
-// 保存あるいはElasticsearch等にinsertするためのデータの構造体
-type result struct {
-	UserName              string
-	UserScreenName        string
-	CleanedText           string
-	WakatiText            string
-	FormattedCreatedAtJst string
-	QueryID               string
+// Search APIの結果および、分かち書きの結果などを保持する構造体
+type eachResult struct {
+	Statuses    Statuses
+	CleanedText string
+	WakatiText  string
+	FormattedCreatedAt	string
 }
 
-// jsonStrを受け取り、パース後の構造体を返す
 func parseJSON(jsonStr string) Statuses {
 	var result Statuses
 	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
@@ -83,7 +80,7 @@ func cleanText(text string, repl *strings.Replacer, ptns []*regexp.Regexp) strin
 }
 
 // WriteLines is function to write string array.
-func WriteLines(filename string, results []result, linesep string, writeBom bool, modeflag string, permission os.FileMode) error {
+func WriteLines(filename string, lines []string, linesep string, writeBom bool, modeflag string, permission os.FileMode) error {
 	mode := os.O_WRONLY | os.O_CREATE
 	if modeflag == "a" {
 		mode = os.O_WRONLY | os.O_APPEND
@@ -100,16 +97,14 @@ func WriteLines(filename string, results []result, linesep string, writeBom bool
 		f.Write([]byte{239, 187, 191})
 	}
 
-	for _, r := range results {
-		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", r.FormattedCreatedAtJst, r.QueryID, r.UserName, r.UserScreenName, r.CleanedText, r.WakatiText)
+	for _, line := range lines {
 		f.WriteString(line + linesep)
 	}
 
 	return nil
 }
 
-// func extractEachFile(fileName string, mecabModel *mecab.Model) []string {
-func extractEachFile(fileName string, mecabModel *mecab.Model) []result {
+func extractEachFile(fileName string, mecabModel *mecab.Model) []string {
 	repl := strings.NewReplacer(
 		"\r\n", "",
 		"\r", "",
@@ -147,12 +142,9 @@ func extractEachFile(fileName string, mecabModel *mecab.Model) []result {
 	queryID := strings.Split(fileName, "_")[2]
 
 	// 結果格納用の配列
-	// lines := []string{}
-
-	results := []result{}
+	lines := []string{}
 
 	for {
-
 		// 読み込みバッファを元に、1行ずつ取得
 		line, err := totext.ReadLine(rd, make([]byte, 0, 1024*1024))
 		if err != nil {
@@ -195,31 +187,19 @@ func extractEachFile(fileName string, mecabModel *mecab.Model) []result {
 				text = cleanText(text, repl, ptns)
 
 				// 分かち書きを実行
-				wakati, err := tagger.Parse(text)
+				text, err = tagger.Parse(text)
 				if err != nil {
 					continue
 				}
 
-				wakati = strings.TrimRight(wakati, "\n")
+				text = strings.TrimRight(text, "\n")
 
-				eachResult := result{
-					UserName:              eachStatus.User.Name,
-					UserScreenName:        eachStatus.User.ScreenName,
-					CleanedText:           text,
-					WakatiText:            wakati,
-					FormattedCreatedAtJst: createdAtJst.Format("2006-01-02 15:04:05"),
-					QueryID:               queryID,
-				}
-
-				// lines = append(lines, fmt.Sprintf("%s\t%s\t%s\t%s\t%s", createdAtJst.Format("2006-01-02 15:04:05"), queryID, eachStatus.User.Name, eachStatus.User.ScreenName, text))
-
-				results = append(results, eachResult)
+				lines = append(lines, fmt.Sprintf("%s\t%s\t%s\t%s\t%s", createdAtJst.Format("2006-01-02 15:04:05"), queryID, eachStatus.User.Name, eachStatus.User.ScreenName, text))
 			}
 		}
 	}
 
-	// return lines
-	return results
+	return lines
 }
 
 func bulkInsert(lines []string, cli *elastic.Client, c *context.Context) error {
@@ -267,19 +247,7 @@ func bulkInsert(lines []string, cli *elastic.Client, c *context.Context) error {
 func fileWalker(i int, filePath string, outdir string, mecabModel *mecab.Model, wg *sync.WaitGroup, ch *chan int) {
 	glog.V(3).Infof("[%d] extract: %s", i, filePath)
 
-	results := extractEachFile(filePath, mecabModel)
-
-	glog.V(3).Infof("%s", results[0].QueryID)
-
-	// 出力先のファイル名を作成
-	filebase := filepath.Base(strings.Replace(filepath.Base(filePath), ".tsv", "", -1))
-	outfile := outdir + "/" + filebase + "_out.tsv"
-
-	// ファイルを保存
-	err := WriteLines(outfile, results, "\n", true, "w", 0644)
-	if err != nil {
-		glog.Errorf("%s", err)
-	}
+	texts := extractEachFile(filePath, mecabModel)
 
 	/*
 		// 出力先のファイル名を作成
@@ -293,25 +261,23 @@ func fileWalker(i int, filePath string, outdir string, mecabModel *mecab.Model, 
 		}
 	*/
 
-	/*
-		c := context.Background()
+	c := context.Background()
 
-		esClient, err := elastic.NewClient(
-			elastic.SetURL("http://localhost:9200"),
-			elastic.SetSniff(false),
-		)
+	esClient, err := elastic.NewClient(
+		elastic.SetURL("http://localhost:9200"),
+		elastic.SetSniff(false),
+	)
 
-		if err != nil {
-			glog.Errorf("%s", err)
-		}
+	if err != nil {
+		glog.Errorf("%s", err)
+	}
 
-		defer esClient.Stop()
+	defer esClient.Stop()
 
-		err = bulkInsert(texts, esClient, &c)
-		if err != nil {
-			glog.Errorf("%s", err)
-		}
-	*/
+	err = bulkInsert(texts, esClient, &c)
+	if err != nil {
+		glog.Errorf("%s", err)
+	}
 
 	// チャンネルから値を取り出す(一つ空ける)
 	// 空くので、次のスレッドが開始可能になる

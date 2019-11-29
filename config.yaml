@@ -1,1 +1,9 @@
-datadir: "/mnt/v01/resource/twitter/twitter-table-dump_result/"
+# Twitter APIの取得結果ファイルを格納しているディレクトリ
+dataDir: "/mnt/v01/resource/twitter/twitter-table-dump_result/"
+
+# dataDirと共に、Globで使用するファイルパターン
+# 4007=白猫
+filePattern: "4007/*.tsv"
+
+# 並行処理のためのスレッド数
+maxThreads: 4
